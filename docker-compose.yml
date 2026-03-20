@@ -4,8 +4,8 @@ services:
     container_name: asambleas_db
     environment:
       POSTGRES_DB: asambleas_edu_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     ports:
       - "5432:5432"
     volumes:
@@ -23,9 +23,11 @@ services:
     container_name: asambleas_api
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
-      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=asambleas_edu_db;Username=postgres;Password=postgres
+      # Secrets via env vars — en producción usar Docker Secrets o un vault
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=asambleas_edu_db;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+      - JwtSettings__Secret=${JWT_SECRET:-AsambleasEdu-SuperSecret-Key-2024-MustBe-AtLeast-32-Characters-Long!}
     ports:
-      - "5263:5263"
+      - "8080:8080"
     depends_on:
       db:
         condition: service_healthy

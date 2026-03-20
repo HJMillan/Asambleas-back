@@ -1,25 +1,41 @@
-# Build stage
+# ══════════════════════════════════════════════════════
+# Multi-stage build: SDK para compilar, runtime minimal para producción
+# ══════════════════════════════════════════════════════
+
+# ── Build stage ──
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# Copy csproj and restore
+# Copiar csproj primero para aprovechar cache de capas en restore
 COPY Asambleas/Asambleas.csproj Asambleas/
 RUN dotnet restore Asambleas/Asambleas.csproj
 
-# Copy everything and build
+# Copiar todo el código y compilar en modo Release
 COPY . .
 WORKDIR /src/Asambleas
-RUN dotnet publish -c Release -o /app/publish
+RUN dotnet publish -c Release -o /app/publish --no-restore
 
-# Runtime stage
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+# ── Runtime stage ──
+# Usar imagen chiseled (sin shell, sin package manager, sin root user)
+# Es la imagen más segura disponible: superficie de ataque mínima
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled AS runtime
 WORKDIR /app
 
+# Copiar artefactos compilados (sin SDK, sin código fuente, sin herramientas de debug)
 COPY --from=build /app/publish .
 
-ENV ASPNETCORE_URLS=http://+:5263
+# Variables de entorno
+ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production
 
-EXPOSE 5263
+# La imagen chiseled ya corre como non-root (user 'app', UID 1654)
+# No es necesario crear usuario ni usar USER explícitamente
+
+# Solo exponer el puerto necesario
+EXPOSE 8080
+
+# Healthcheck para orquestadores (Docker Compose, Kubernetes)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["dotnet", "Asambleas.dll", "--urls", "http://localhost:8080/health"] || exit 1
 
 ENTRYPOINT ["dotnet", "Asambleas.dll"]
