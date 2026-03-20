@@ -13,6 +13,7 @@ public class AuthService
     private readonly JwtSettings _jwtSettings;
     private readonly ILdapService _ldap;
     private readonly IDomelecService _domelec;
+    private readonly ILogger<AuthService> _logger;
 
     private const int MaxLoginAttempts = 5;
     private const int LockoutSeconds = 30;
@@ -22,27 +23,23 @@ public class AuthService
         JwtTokenService jwt,
         IOptions<JwtSettings> jwtSettings,
         ILdapService ldap,
-        IDomelecService domelec)
+        IDomelecService domelec,
+        ILogger<AuthService> logger)
     {
         _db = db;
         _jwt = jwt;
         _jwtSettings = jwtSettings.Value;
         _ldap = ldap;
         _domelec = domelec;
+        _logger = logger;
     }
 
     // ── Register ──
 
     public async Task<(User User, string AccessToken, string RefreshToken)> RegisterAsync(RegisterRequest request)
     {
-        if (request.Password != request.ConfirmPassword)
-            throw new ArgumentException("Las contraseñas no coinciden.");
-
-        if (request.Password.Length < 6)
-            throw new ArgumentException("La contraseña debe tener al menos 6 caracteres.");
-
-        if (request.Cuil.Length != 11 || !request.Cuil.All(char.IsDigit))
-            throw new ArgumentException("El CUIL debe tener 11 dígitos.");
+        // Validación ahora delegada a FluentValidation (RegisterRequestValidator).
+        // Solo queda la validación de negocio (duplicados en DB).
 
         var existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Cuil == request.Cuil);
         if (existingUser != null)
@@ -75,6 +72,10 @@ public class AuthService
 
         await _db.SaveChangesAsync();
 
+        _logger.LogInformation(
+            "Nuevo usuario registrado. UserId={UserId}, Role={Role}",
+            user.Id, user.Role);
+
         return (user, accessToken, refreshToken);
     }
 
@@ -84,12 +85,21 @@ public class AuthService
     {
         var user = await _db.Users.FirstOrDefaultAsync(u => u.Cuil == request.Cuil);
         if (user == null)
+        {
+            // Log intento fallido sin revelar si el CUIL existe o no
+            _logger.LogWarning(
+                "Intento de login fallido: CUIL no encontrado. CUIL={CuilPrefix}***",
+                request.Cuil[..3]);
             throw new UnauthorizedAccessException("CUIL o contraseña incorrectos.");
+        }
 
         // Check lockout
         if (user.LockoutEnd.HasValue && user.LockoutEnd > DateTime.UtcNow)
         {
             var remainingSeconds = (int)(user.LockoutEnd.Value - DateTime.UtcNow).TotalSeconds;
+            _logger.LogWarning(
+                "Intento de login en cuenta bloqueada. UserId={UserId}, RemainingSeconds={Remaining}",
+                user.Id, remainingSeconds);
             throw new UnauthorizedAccessException($"Cuenta bloqueada. Intente nuevamente en {remainingSeconds} segundos.");
         }
 
@@ -101,7 +111,17 @@ public class AuthService
             {
                 user.LockoutEnd = DateTime.UtcNow.AddSeconds(LockoutSeconds);
                 user.LoginAttempts = 0;
+                _logger.LogWarning(
+                    "Cuenta bloqueada por exceso de intentos. UserId={UserId}, LockoutSeconds={Lockout}",
+                    user.Id, LockoutSeconds);
             }
+            else
+            {
+                _logger.LogWarning(
+                    "Intento de login fallido (contraseña incorrecta). UserId={UserId}, Attempt={Attempt}/{Max}",
+                    user.Id, user.LoginAttempts, MaxLoginAttempts);
+            }
+
             await _db.SaveChangesAsync();
             throw new UnauthorizedAccessException("CUIL o contraseña incorrectos.");
         }
@@ -113,6 +133,8 @@ public class AuthService
         var (accessToken, refreshToken) = await GenerateTokensAsync(user);
         await _db.SaveChangesAsync();
 
+        _logger.LogInformation("Login exitoso. UserId={UserId}", user.Id);
+
         return (user, accessToken, refreshToken);
     }
 
@@ -122,7 +144,12 @@ public class AuthService
     {
         var ldapResult = await _ldap.AuthenticateAsync(request.Username, request.Password);
         if (ldapResult == null)
+        {
+            _logger.LogWarning(
+                "Intento de login LDAP fallido. Username={Username}",
+                request.Username);
             throw new UnauthorizedAccessException("Credenciales LDAP incorrectas.");
+        }
 
         // Find or create user from LDAP data
         var user = await _db.Users.FirstOrDefaultAsync(u => u.LdapUsername == request.Username);
@@ -143,10 +170,16 @@ public class AuthService
                 IsDomelecVerified = true
             };
             _db.Users.Add(user);
+
+            _logger.LogInformation(
+                "Nuevo usuario LDAP creado. Username={Username}, Role={Role}",
+                request.Username, user.Role);
         }
 
         var (accessToken, refreshToken) = await GenerateTokensAsync(user);
         await _db.SaveChangesAsync();
+
+        _logger.LogInformation("Login LDAP exitoso. UserId={UserId}", user.Id);
 
         return (user, accessToken, refreshToken);
     }
@@ -171,21 +204,46 @@ public class AuthService
             throw new UnauthorizedAccessException("Usuario no encontrado.");
 
         var storedToken = user.RefreshTokens
-            .FirstOrDefault(t => t.Token == refreshTokenValue && !t.IsRevoked);
+            .FirstOrDefault(t => t.Token == refreshTokenValue);
 
         if (storedToken == null)
-            throw new UnauthorizedAccessException("Refresh token inválido o revocado.");
+            throw new UnauthorizedAccessException("Refresh token inválido.");
+
+        // ── DETECCIÓN DE REUTILIZACIÓN ──
+        // Si el token ya fue revocado, significa que alguien está reutilizando un token viejo.
+        // Esto indica un posible robo de tokens → revocar TODA la familia del usuario.
+        if (storedToken.IsRevoked)
+        {
+            _logger.LogCritical(
+                "⚠️ REUSO DE REFRESH TOKEN DETECTADO. Posible robo de tokens. " +
+                "UserId={UserId}, TokenId={TokenId}. Revocando todos los tokens del usuario.",
+                userId, storedToken.Id);
+
+            // Revocar todos los tokens activos del usuario
+            foreach (var token in user.RefreshTokens.Where(t => !t.IsRevoked))
+            {
+                token.IsRevoked = true;
+                token.RevokedAt = DateTime.UtcNow;
+            }
+
+            await _db.SaveChangesAsync();
+            throw new UnauthorizedAccessException("Sesión comprometida. Por seguridad, se cerraron todas las sesiones.");
+        }
 
         // Allow refresh within a 5-minute margin after expiration
         var margin = TimeSpan.FromMinutes(5);
         if (storedToken.ExpiresAt.Add(margin) < DateTime.UtcNow)
             throw new UnauthorizedAccessException("Refresh token expirado.");
 
-        // Revoke old token
+        // Revocar token viejo y registrar la cadena de reemplazo
         storedToken.IsRevoked = true;
         storedToken.RevokedAt = DateTime.UtcNow;
 
         var (accessToken, newRefreshToken) = await GenerateTokensAsync(user);
+
+        // Registrar el enlace en la cadena de rotación
+        storedToken.ReplacedByToken = newRefreshToken;
+
         await _db.SaveChangesAsync();
 
         return (user, accessToken, newRefreshToken);
@@ -207,6 +265,8 @@ public class AuthService
                 await _db.SaveChangesAsync();
             }
         }
+
+        _logger.LogInformation("Logout. UserId={UserId}", userId);
     }
 
     // ── Get User ──

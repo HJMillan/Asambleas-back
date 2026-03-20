@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Asambleas.Infrastructure.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 
 namespace Asambleas.Features.Auth;
@@ -22,6 +23,8 @@ public class AuthController : ControllerBase
     /// <summary>
     /// Registro de nuevo usuario (siempre con rol DOCENTE).
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth")]
     [HttpPost("register")]
     public async Task<ActionResult<AuthResponse>> Register([FromBody] RegisterRequest request)
     {
@@ -38,6 +41,8 @@ public class AuthController : ControllerBase
     /// <summary>
     /// Login por CUIL + contraseña.
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth")]
     [HttpPost("login")]
     public async Task<ActionResult<AuthResponse>> LoginCuil([FromBody] LoginCuilRequest request)
     {
@@ -54,6 +59,8 @@ public class AuthController : ControllerBase
     /// <summary>
     /// Login por usuario de red LDAP.
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth")]
     [HttpPost("login/ldap")]
     public async Task<ActionResult<AuthResponse>> LoginLdap([FromBody] LoginLdapRequest request)
     {
@@ -70,6 +77,8 @@ public class AuthController : ControllerBase
     /// <summary>
     /// Refresh de tokens (lee refresh_token de cookie).
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth")]
     [HttpPost("refresh")]
     public async Task<ActionResult<AuthResponse>> Refresh()
     {
