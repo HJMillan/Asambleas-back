@@ -2,6 +2,9 @@ using Asambleas.Common.Entities;
 
 namespace Asambleas.Features.Asambleas.Entities;
 
+/// <summary>
+/// Nivel educativo de una asamblea.
+/// </summary>
 public enum NivelAsamblea
 {
     INICIAL,
@@ -11,6 +14,9 @@ public enum NivelAsamblea
     ESPECIAL
 }
 
+/// <summary>
+/// Tipo de convocatoria de la asamblea.
+/// </summary>
 public enum TipoAsamblea
 {
     ORDINARIA,
@@ -18,6 +24,9 @@ public enum TipoAsamblea
     COMPLEMENTARIA
 }
 
+/// <summary>
+/// Estado del ciclo de vida de una asamblea.
+/// </summary>
 public enum EstadoAsamblea
 {
     PROGRAMADA,
@@ -26,6 +35,10 @@ public enum EstadoAsamblea
     CANCELADA
 }
 
+/// <summary>
+/// Representa una asamblea de designación docente, con su fecha, nivel educativo,
+/// ventanas de inscripción y horarios.
+/// </summary>
 public class Asamblea : BaseEntity
 {
     public DateTime Fecha { get; set; }

@@ -14,6 +14,7 @@ public class User : BaseEntity
     public Role Role { get; set; } = Role.DOCENTE;
     public bool IsDomelecVerified { get; set; }
     public int LoginAttempts { get; set; }
+    public int ConsecutiveLockouts { get; set; }
     public DateTime? LockoutEnd { get; set; }
 
     // LDAP

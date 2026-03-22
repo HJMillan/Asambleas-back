@@ -3,6 +3,9 @@ using Asambleas.Features.Auth.Entities;
 
 namespace Asambleas.Features.Designaciones.Entities;
 
+/// <summary>
+/// Estado del flujo de trabajo de una designación docente.
+/// </summary>
 public enum EstadoDesignacion
 {
     PENDIENTE,
@@ -15,6 +18,10 @@ public enum EstadoDesignacion
     CANCELADA
 }
 
+/// <summary>
+/// Representa la designación de un docente a una vacante durante una asamblea.
+/// Soporta hasta 3 instancias de designación y puede ser impugnada.
+/// </summary>
 public class Designacion : BaseEntity
 {
     public int Instancia { get; set; } = 1; // 1, 2, 3

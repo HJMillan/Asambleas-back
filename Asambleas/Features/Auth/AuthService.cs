@@ -1,32 +1,46 @@
+using System.Security.Cryptography;
+using System.Text;
+using Asambleas.Common;
 using Asambleas.Features.Auth.Entities;
-using Asambleas.Infrastructure.Database;
 using Asambleas.Infrastructure.Security;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace Asambleas.Features.Auth;
 
-public class AuthService
+/// <summary>
+/// Servicio de autenticación. Usa repositorios para acceso a datos y Result&lt;T&gt;
+/// para errores de negocio, reservando excepciones solo para errores inesperados.
+/// </summary>
+public class AuthService : IAuthService
 {
-    private readonly ApplicationDbContext _db;
-    private readonly JwtTokenService _jwt;
+    private readonly IUserRepository _users;
+    private readonly IRefreshTokenRepository _tokens;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IJwtTokenService _jwt;
     private readonly JwtSettings _jwtSettings;
     private readonly ILdapService _ldap;
     private readonly IDomelecService _domelec;
     private readonly ILogger<AuthService> _logger;
 
     private const int MaxLoginAttempts = 5;
-    private const int LockoutSeconds = 30;
+    private const int MaxActiveRefreshTokens = 5;
 
+    /// <summary>
+    /// Constructor con inyección de dependencias.
+    /// </summary>
     public AuthService(
-        ApplicationDbContext db,
-        JwtTokenService jwt,
+        IUserRepository users,
+        IRefreshTokenRepository tokens,
+        IUnitOfWork unitOfWork,
+        IJwtTokenService jwt,
         IOptions<JwtSettings> jwtSettings,
         ILdapService ldap,
         IDomelecService domelec,
         ILogger<AuthService> logger)
     {
-        _db = db;
+        _users = users;
+        _tokens = tokens;
+        _unitOfWork = unitOfWork;
         _jwt = jwt;
         _jwtSettings = jwtSettings.Value;
         _ldap = ldap;
@@ -36,20 +50,17 @@ public class AuthService
 
     // ── Register ──
 
-    public async Task<(User User, string AccessToken, string RefreshToken)> RegisterAsync(RegisterRequest request)
+    /// <inheritdoc />
+    public async Task<Result<(User User, string AccessToken, string RefreshToken)>> RegisterAsync(RegisterRequest request)
     {
-        // Validación ahora delegada a FluentValidation (RegisterRequestValidator).
-        // Solo queda la validación de negocio (duplicados en DB).
-
-        var existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Cuil == request.Cuil);
+        var existingUser = await _users.GetByCuilAsync(request.Cuil);
         if (existingUser != null)
-            throw new InvalidOperationException("Ya existe un usuario con este CUIL.");
+            return Result<(User, string, string)>.Conflict("Ya existe un usuario con este CUIL.");
 
-        var existingEmail = await _db.Users.FirstOrDefaultAsync(u => u.Email == request.Email);
+        var existingEmail = await _users.GetByEmailAsync(request.Email);
         if (existingEmail != null)
-            throw new InvalidOperationException("Ya existe un usuario con este email.");
+            return Result<(User, string, string)>.Conflict("Ya existe un usuario con este email.");
 
-        // Extract DNI from CUIL (positions 2-9)
         var dni = request.Cuil.Substring(2, 8);
 
         var user = new User
@@ -63,34 +74,33 @@ public class AuthService
             Role = Role.DOCENTE
         };
 
-        // Domelec verification (stub for now)
         user.IsDomelecVerified = await _domelec.VerificarAsync(user.Cuil);
 
-        _db.Users.Add(user);
+        _users.Add(user);
 
         var (accessToken, refreshToken) = await GenerateTokensAsync(user);
 
-        await _db.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         _logger.LogInformation(
             "Nuevo usuario registrado. UserId={UserId}, Role={Role}",
             user.Id, user.Role);
 
-        return (user, accessToken, refreshToken);
+        return Result<(User, string, string)>.Success((user, accessToken, refreshToken));
     }
 
     // ── Login CUIL ──
 
-    public async Task<(User User, string AccessToken, string RefreshToken)> LoginCuilAsync(LoginCuilRequest request)
+    /// <inheritdoc />
+    public async Task<Result<(User User, string AccessToken, string RefreshToken)>> LoginCuilAsync(LoginCuilRequest request)
     {
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.Cuil == request.Cuil);
+        var user = await _users.GetByCuilAsync(request.Cuil);
         if (user == null)
         {
-            // Log intento fallido sin revelar si el CUIL existe o no
             _logger.LogWarning(
                 "Intento de login fallido: CUIL no encontrado. CUIL={CuilPrefix}***",
                 request.Cuil[..3]);
-            throw new UnauthorizedAccessException("CUIL o contraseña incorrectos.");
+            return Result<(User, string, string)>.Failure("CUIL o contraseña incorrectos.", 401);
         }
 
         // Check lockout
@@ -100,7 +110,7 @@ public class AuthService
             _logger.LogWarning(
                 "Intento de login en cuenta bloqueada. UserId={UserId}, RemainingSeconds={Remaining}",
                 user.Id, remainingSeconds);
-            throw new UnauthorizedAccessException($"Cuenta bloqueada. Intente nuevamente en {remainingSeconds} segundos.");
+            return Result<(User, string, string)>.Failure($"Cuenta bloqueada. Intente nuevamente en {remainingSeconds} segundos.", 429);
         }
 
         // Verify password
@@ -109,11 +119,13 @@ public class AuthService
             user.LoginAttempts++;
             if (user.LoginAttempts >= MaxLoginAttempts)
             {
-                user.LockoutEnd = DateTime.UtcNow.AddSeconds(LockoutSeconds);
+                var lockoutDuration = GetLockoutDuration(user.ConsecutiveLockouts);
+                user.LockoutEnd = DateTime.UtcNow.Add(lockoutDuration);
+                user.ConsecutiveLockouts++;
                 user.LoginAttempts = 0;
                 _logger.LogWarning(
-                    "Cuenta bloqueada por exceso de intentos. UserId={UserId}, LockoutSeconds={Lockout}",
-                    user.Id, LockoutSeconds);
+                    "Cuenta bloqueada por exceso de intentos. UserId={UserId}, LockoutDuration={Duration}, ConsecutiveLockouts={Consecutive}",
+                    user.Id, lockoutDuration, user.ConsecutiveLockouts);
             }
             else
             {
@@ -122,25 +134,27 @@ public class AuthService
                     user.Id, user.LoginAttempts, MaxLoginAttempts);
             }
 
-            await _db.SaveChangesAsync();
-            throw new UnauthorizedAccessException("CUIL o contraseña incorrectos.");
+            await _unitOfWork.SaveChangesAsync();
+            return Result<(User, string, string)>.Failure("CUIL o contraseña incorrectos.", 401);
         }
 
-        // Reset login attempts on success
+        // Reset login attempts and consecutive lockouts on success
         user.LoginAttempts = 0;
+        user.ConsecutiveLockouts = 0;
         user.LockoutEnd = null;
 
         var (accessToken, refreshToken) = await GenerateTokensAsync(user);
-        await _db.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         _logger.LogInformation("Login exitoso. UserId={UserId}", user.Id);
 
-        return (user, accessToken, refreshToken);
+        return Result<(User, string, string)>.Success((user, accessToken, refreshToken));
     }
 
     // ── Login LDAP ──
 
-    public async Task<(User User, string AccessToken, string RefreshToken)> LoginLdapAsync(LoginLdapRequest request)
+    /// <inheritdoc />
+    public async Task<Result<(User User, string AccessToken, string RefreshToken)>> LoginLdapAsync(LoginLdapRequest request)
     {
         var ldapResult = await _ldap.AuthenticateAsync(request.Username, request.Password);
         if (ldapResult == null)
@@ -148,15 +162,13 @@ public class AuthService
             _logger.LogWarning(
                 "Intento de login LDAP fallido. Username={Username}",
                 request.Username);
-            throw new UnauthorizedAccessException("Credenciales LDAP incorrectas.");
+            return Result<(User, string, string)>.Failure("Credenciales LDAP incorrectas.", 401);
         }
 
-        // Find or create user from LDAP data
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.LdapUsername == request.Username);
+        var user = await _users.GetByLdapUsernameAsync(request.Username);
 
         if (user == null)
         {
-            // First LDAP login: create user
             user = new User
             {
                 LdapUsername = request.Username,
@@ -165,11 +177,11 @@ public class AuthService
                 Email = ldapResult.Email,
                 Dni = ldapResult.Dni,
                 Cuil = ldapResult.Cuil,
-                PasswordHash = string.Empty, // No password for LDAP users
-                Role = Role.OPERADOR, // Default role for LDAP users (municipal staff)
+                PasswordHash = string.Empty,
+                Role = Role.OPERADOR,
                 IsDomelecVerified = true
             };
-            _db.Users.Add(user);
+            _users.Add(user);
 
             _logger.LogInformation(
                 "Nuevo usuario LDAP creado. Username={Username}, Role={Role}",
@@ -177,132 +189,176 @@ public class AuthService
         }
 
         var (accessToken, refreshToken) = await GenerateTokensAsync(user);
-        await _db.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         _logger.LogInformation("Login LDAP exitoso. UserId={UserId}", user.Id);
 
-        return (user, accessToken, refreshToken);
+        return Result<(User, string, string)>.Success((user, accessToken, refreshToken));
     }
 
     // ── Refresh ──
 
-    public async Task<(User User, string AccessToken, string NewRefreshToken)> RefreshTokenAsync(string expiredAccessToken, string refreshTokenValue)
+    /// <inheritdoc />
+    public async Task<Result<(User User, string AccessToken, string NewRefreshToken)>> RefreshTokenAsync(string expiredAccessToken, string refreshTokenValue)
     {
         var principal = _jwt.GetPrincipalFromExpiredToken(expiredAccessToken);
         if (principal == null)
-            throw new UnauthorizedAccessException("Token inválido.");
+            return Result<(User, string, string)>.Failure("Token inválido.", 401);
+
+        // Validar antigüedad del access_token expirado (máximo 1 día)
+        var expClaim = principal.FindFirst("exp")?.Value;
+        if (expClaim != null && long.TryParse(expClaim, out var exp))
+        {
+            var expiredAt = DateTimeOffset.FromUnixTimeSeconds(exp).UtcDateTime;
+            if (expiredAt < DateTime.UtcNow.AddDays(-1))
+                return Result<(User, string, string)>.Failure("Token demasiado antiguo para renovar. Inicie sesión nuevamente.", 401);
+        }
 
         var userIdClaim = principal.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
         if (string.IsNullOrEmpty(userIdClaim) || !Guid.TryParse(userIdClaim, out var userId))
-            throw new UnauthorizedAccessException("Token inválido.");
+            return Result<(User, string, string)>.Failure("Token inválido.", 401);
 
-        var user = await _db.Users
-            .Include(u => u.RefreshTokens)
-            .FirstOrDefaultAsync(u => u.Id == userId);
+        var user = await _users.GetByIdWithTokensAsync(userId);
 
         if (user == null)
-            throw new UnauthorizedAccessException("Usuario no encontrado.");
+            return Result<(User, string, string)>.NotFound("Usuario no encontrado.");
 
+        // Buscar por hash SHA-256 del refresh token presentado
+        var tokenHash = HashRefreshToken(refreshTokenValue);
         var storedToken = user.RefreshTokens
-            .FirstOrDefault(t => t.Token == refreshTokenValue);
+            .FirstOrDefault(t => t.Token == tokenHash);
 
         if (storedToken == null)
-            throw new UnauthorizedAccessException("Refresh token inválido.");
+            return Result<(User, string, string)>.Failure("Refresh token inválido.", 401);
 
         // ── DETECCIÓN DE REUTILIZACIÓN ──
-        // Si el token ya fue revocado, significa que alguien está reutilizando un token viejo.
-        // Esto indica un posible robo de tokens → revocar TODA la familia del usuario.
         if (storedToken.IsRevoked)
         {
             _logger.LogCritical(
                 "⚠️ REUSO DE REFRESH TOKEN DETECTADO. Posible robo de tokens. " +
-                "UserId={UserId}, TokenId={TokenId}. Revocando todos los tokens del usuario.",
-                userId, storedToken.Id);
+                "UserId={UserId}, TokenId={TokenId}, FamilyId={FamilyId}. Revocando todos los tokens del usuario.",
+                userId, storedToken.Id, storedToken.FamilyId);
 
-            // Revocar todos los tokens activos del usuario
             foreach (var token in user.RefreshTokens.Where(t => !t.IsRevoked))
             {
                 token.IsRevoked = true;
                 token.RevokedAt = DateTime.UtcNow;
             }
 
-            await _db.SaveChangesAsync();
-            throw new UnauthorizedAccessException("Sesión comprometida. Por seguridad, se cerraron todas las sesiones.");
+            await _unitOfWork.SaveChangesAsync();
+            return Result<(User, string, string)>.Failure("Sesión comprometida. Por seguridad, se cerraron todas las sesiones.", 401);
         }
 
-        // Allow refresh within a 5-minute margin after expiration
         var margin = TimeSpan.FromMinutes(5);
         if (storedToken.ExpiresAt.Add(margin) < DateTime.UtcNow)
-            throw new UnauthorizedAccessException("Refresh token expirado.");
+            return Result<(User, string, string)>.Failure("Refresh token expirado.", 401);
 
-        // Revocar token viejo y registrar la cadena de reemplazo
         storedToken.IsRevoked = true;
         storedToken.RevokedAt = DateTime.UtcNow;
 
-        var (accessToken, newRefreshToken) = await GenerateTokensAsync(user);
+        var (accessToken, newRefreshToken) = await GenerateTokensAsync(user, storedToken.FamilyId);
 
-        // Registrar el enlace en la cadena de rotación
-        storedToken.ReplacedByToken = newRefreshToken;
+        storedToken.ReplacedByToken = HashRefreshToken(newRefreshToken);
 
-        await _db.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
-        return (user, accessToken, newRefreshToken);
+        return Result<(User, string, string)>.Success((user, accessToken, newRefreshToken));
     }
 
     // ── Logout ──
 
+    /// <inheritdoc />
     public async Task LogoutAsync(Guid userId, string? refreshTokenValue)
     {
         if (!string.IsNullOrEmpty(refreshTokenValue))
         {
-            var token = await _db.RefreshTokens
-                .FirstOrDefaultAsync(t => t.UserId == userId && t.Token == refreshTokenValue && !t.IsRevoked);
+            var tokenHash = HashRefreshToken(refreshTokenValue);
+            var token = await _tokens.GetByTokenValueAsync(userId, tokenHash);
 
-            if (token != null)
+            if (token is { IsRevoked: false })
             {
                 token.IsRevoked = true;
                 token.RevokedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync();
+                await _unitOfWork.SaveChangesAsync();
             }
         }
 
         _logger.LogInformation("Logout. UserId={UserId}", userId);
     }
 
+    // ── Revoke All Sessions ──
+
+    /// <inheritdoc />
+    public async Task RevokeAllTokensAsync(Guid userId)
+    {
+        var revoked = await _tokens.RevokeAllByUserIdAsync(userId);
+
+        _logger.LogWarning(
+            "Todas las sesiones revocadas. UserId={UserId}, TokensRevocados={Count}",
+            userId, revoked);
+    }
+
     // ── Get User ──
 
+    /// <inheritdoc />
     public async Task<User?> GetByIdAsync(Guid userId)
     {
-        return await _db.Users.FindAsync(userId);
+        return await _users.GetByIdReadOnlyAsync(userId);
     }
 
     // ── Helpers ──
 
-    private async Task<(string AccessToken, string RefreshToken)> GenerateTokensAsync(User user)
+    /// <summary>
+    /// Lockout escalado — cada lockout consecutivo aumenta la duración.
+    /// </summary>
+    private static TimeSpan GetLockoutDuration(int consecutiveLockouts) => consecutiveLockouts switch
     {
+        0 => TimeSpan.FromSeconds(30),
+        1 => TimeSpan.FromMinutes(5),
+        2 => TimeSpan.FromMinutes(15),
+        _ => TimeSpan.FromHours(1)
+    };
+
+    /// <summary>
+    /// Genera par de tokens y revoca tokens antiguos si exceden el máximo permitido.
+    /// Nota: La query separada para tokens activos es intencional (ver ADR-003 #15).
+    /// </summary>
+    private async Task<(string AccessToken, string RefreshToken)> GenerateTokensAsync(User user, string? familyId = null)
+    {
+        var activeTokens = await _tokens.GetActiveTokensByUserIdAsync(user.Id);
+
+        if (activeTokens.Count >= MaxActiveRefreshTokens)
+        {
+            foreach (var old in activeTokens.Take(activeTokens.Count - MaxActiveRefreshTokens + 1))
+            {
+                old.IsRevoked = true;
+                old.RevokedAt = DateTime.UtcNow;
+            }
+        }
+
         var accessToken = _jwt.GenerateAccessToken(user);
         var refreshTokenValue = _jwt.GenerateRefreshToken();
 
         var refreshToken = new RefreshToken
         {
-            Token = refreshTokenValue,
+            Token = HashRefreshToken(refreshTokenValue),
             ExpiresAt = DateTime.UtcNow.AddDays(_jwtSettings.RefreshTokenExpirationDays),
-            UserId = user.Id
+            UserId = user.Id,
+            FamilyId = familyId ?? Guid.NewGuid().ToString("N")
         };
 
-        _db.RefreshTokens.Add(refreshToken);
+        _tokens.Add(refreshToken);
 
         return (accessToken, refreshTokenValue);
     }
 
-    public static UserInfoResponse MapToResponse(User user) => new(
-        Id: user.Id,
-        Dni: user.Dni,
-        Cuil: user.Cuil,
-        Nombre: user.Nombre,
-        Apellido: user.Apellido,
-        Email: user.Email,
-        Role: user.Role.ToString(),
-        IsDomelecVerified: user.IsDomelecVerified
-    );
+    /// <summary>
+    /// SHA-256 hash de refresh token para almacenamiento seguro en DB.
+    /// Si la DB se compromete, los tokens hasheados no son usables.
+    /// </summary>
+    private static string HashRefreshToken(string token)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        return Convert.ToBase64String(bytes);
+    }
 }

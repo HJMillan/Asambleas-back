@@ -25,7 +25,7 @@ services:
       - ASPNETCORE_ENVIRONMENT=Development
       # Secrets via env vars — en producción usar Docker Secrets o un vault
       - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=asambleas_edu_db;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
-      - JwtSettings__Secret=${JWT_SECRET:-AsambleasEdu-SuperSecret-Key-2024-MustBe-AtLeast-32-Characters-Long!}
+      - JwtSettings__Secret=${JWT_SECRET:?JWT_SECRET is required}
     ports:
       - "8080:8080"
     depends_on:

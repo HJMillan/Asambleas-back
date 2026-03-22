@@ -17,6 +17,12 @@ public class RefreshToken : BaseEntity
     /// </summary>
     public string? ReplacedByToken { get; set; }
 
+    /// <summary>
+    /// Groups related refresh tokens into a family for reuse detection.
+    /// When reuse is detected, all tokens in the family are revoked.
+    /// </summary>
+    public string FamilyId { get; set; } = Guid.NewGuid().ToString("N");
+
     // Foreign key
     public Guid UserId { get; set; }
     public User User { get; set; } = null!;

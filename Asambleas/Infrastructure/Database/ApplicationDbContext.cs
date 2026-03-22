@@ -1,4 +1,8 @@
+using System.Linq.Expressions;
+using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
+using Asambleas.Common;
 using Asambleas.Features.Auth.Entities;
 using Asambleas.Features.Docentes.Entities;
 using Asambleas.Features.Asambleas.Entities;
@@ -9,9 +13,17 @@ using Asambleas.Features.DeclaracionJurada.Entities;
 
 namespace Asambleas.Infrastructure.Database;
 
-public class ApplicationDbContext : DbContext
+public class ApplicationDbContext : DbContext, IUnitOfWork
 {
-    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options) { }
+    private readonly IHttpContextAccessor? _httpContextAccessor;
+    private IDbContextTransaction? _currentTransaction;
+
+    public ApplicationDbContext(
+        DbContextOptions<ApplicationDbContext> options,
+        IHttpContextAccessor? httpContextAccessor = null) : base(options)
+    {
+        _httpContextAccessor = httpContextAccessor;
+    }
 
     // Auth
     public DbSet<User> Users => Set<User>();
@@ -228,28 +240,99 @@ public class ApplicationDbContext : DbContext
                 .HasForeignKey(emp => emp.DeclaracionJuradaId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
+
+        // ══════════════════════════════════════════════════
+        // GLOBAL QUERY FILTERS: Soft delete
+        // Filtra automáticamente las entidades eliminadas en todas las queries.
+        // Para incluir eliminadas: .IgnoreQueryFilters()
+        // ══════════════════════════════════════════════════
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes())
+        {
+            if (typeof(Common.Entities.BaseEntity).IsAssignableFrom(entityType.ClrType))
+            {
+                var parameter = Expression.Parameter(entityType.ClrType, "e");
+                var property = Expression.Property(parameter, nameof(Common.Entities.BaseEntity.IsDeleted));
+                var filter = Expression.Lambda(Expression.Equal(property, Expression.Constant(false)), parameter);
+                modelBuilder.Entity(entityType.ClrType).HasQueryFilter(filter);
+            }
+        }
     }
 
     public override int SaveChanges()
     {
-        UpdateTimestamps();
+        ApplyConventions();
         return base.SaveChanges();
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
-        UpdateTimestamps();
+        ApplyConventions();
         return base.SaveChangesAsync(cancellationToken);
     }
 
-    private void UpdateTimestamps()
+    // ── IUnitOfWork implementation ──
+
+    public async Task<IDisposable> BeginTransactionAsync(CancellationToken ct = default)
     {
-        var entries = ChangeTracker.Entries<Common.Entities.BaseEntity>();
-        foreach (var entry in entries)
+        _currentTransaction = await Database.BeginTransactionAsync(ct);
+        return _currentTransaction;
+    }
+
+    public async Task CommitTransactionAsync(CancellationToken ct = default)
+    {
+        if (_currentTransaction != null)
         {
-            if (entry.State == EntityState.Modified)
+            await _currentTransaction.CommitAsync(ct);
+            await _currentTransaction.DisposeAsync();
+            _currentTransaction = null;
+        }
+    }
+
+    public async Task RollbackTransactionAsync(CancellationToken ct = default)
+    {
+        if (_currentTransaction != null)
+        {
+            await _currentTransaction.RollbackAsync(ct);
+            await _currentTransaction.DisposeAsync();
+            _currentTransaction = null;
+        }
+    }
+
+    async Task IUnitOfWork.SaveChangesAsync(CancellationToken ct)
+    {
+        await SaveChangesAsync(ct);
+    }
+
+    private void ApplyConventions()
+    {
+        var userId = _httpContextAccessor?.HttpContext?.User
+            .FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        var ipAddress = _httpContextAccessor?.HttpContext?.Connection
+            .RemoteIpAddress?.MapToIPv4().ToString();
+
+        foreach (var entry in ChangeTracker.Entries<Common.Entities.BaseEntity>())
+        {
+            switch (entry.State)
             {
-                entry.Entity.UpdatedAt = DateTime.UtcNow;
+                case EntityState.Added:
+                    entry.Entity.CreatedAt = DateTime.UtcNow;
+                    entry.Entity.UpdatedAt = DateTime.UtcNow;
+                    entry.Entity.CreatedBy = userId;
+                    entry.Entity.UpdatedBy = userId;
+                    entry.Entity.CreatedFromIp = ipAddress;
+                    break;
+                case EntityState.Modified:
+                    entry.Entity.UpdatedAt = DateTime.UtcNow;
+                    entry.Entity.UpdatedBy = userId;
+                    break;
+                case EntityState.Deleted:
+                    // Soft delete: interceptar DELETE y convertir a UPDATE
+                    entry.State = EntityState.Modified;
+                    entry.Entity.IsDeleted = true;
+                    entry.Entity.DeletedAt = DateTime.UtcNow;
+                    entry.Entity.UpdatedAt = DateTime.UtcNow;
+                    entry.Entity.UpdatedBy = userId;
+                    break;
             }
         }
     }

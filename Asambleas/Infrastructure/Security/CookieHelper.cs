@@ -6,23 +6,25 @@ public static class CookieHelper
 {
     private const string AccessTokenCookie = "access_token";
     private const string RefreshTokenCookie = "refresh_token";
+    // Usar /api/ para cubrir todas las versiones (/api/v1/auth, /api/v2/auth, etc.)
+    private const string RefreshTokenPath = "/api/";
 
-    public static void SetTokenCookies(HttpResponse response, string accessToken, string refreshToken, JwtSettings settings)
+    public static void SetTokenCookies(HttpResponse response, string accessToken, string refreshToken, JwtSettings settings, bool isSecure = true)
     {
         var accessCookieOptions = new CookieOptions
         {
             HttpOnly = true,
-            Secure = true,
-            SameSite = SameSiteMode.Strict,
+            Secure = isSecure,
+            SameSite = isSecure ? SameSiteMode.Strict : SameSiteMode.Lax,
             Expires = DateTime.UtcNow.AddMinutes(settings.AccessTokenExpirationMinutes)
         };
 
         var refreshCookieOptions = new CookieOptions
         {
             HttpOnly = true,
-            Secure = true,
-            SameSite = SameSiteMode.Strict,
-            Path = "/api/auth",
+            Secure = isSecure,
+            SameSite = isSecure ? SameSiteMode.Strict : SameSiteMode.Lax,
+            Path = RefreshTokenPath,
             Expires = DateTime.UtcNow.AddDays(settings.RefreshTokenExpirationDays)
         };
 
@@ -46,7 +48,7 @@ public static class CookieHelper
             HttpOnly = true,
             Secure = true,
             SameSite = SameSiteMode.Strict,
-            Path = "/api/auth",
+            Path = RefreshTokenPath,
             Expires = DateTime.UtcNow.AddDays(-1)
         });
     }

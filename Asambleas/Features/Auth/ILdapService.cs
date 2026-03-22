@@ -27,19 +27,24 @@ public record LdapUserInfo(
 /// <summary>
 /// Development stub that always returns success.
 /// Replace with real LDAP implementation when server is available.
+/// Genera datos únicos por username para evitar conflictos de unicidad en DB.
 /// </summary>
 public class LdapServiceStub : ILdapService
 {
     public Task<LdapUserInfo?> AuthenticateAsync(string username, string password)
     {
-        // Stub: always returns a mock user for development
+        // Generar un hash numérico estable para el username
+        var hash = Math.Abs(username.GetHashCode()) % 100000000;
+        var dni = hash.ToString("D8");
+        var cuil = $"20{dni}0";
+
         var mockUser = new LdapUserInfo(
             Username: username,
             Nombre: "Usuario",
-            Apellido: "LDAP",
+            Apellido: username.ToUpperInvariant(),
             Email: $"{username}@municipio.gob.ar",
-            Dni: "12345678",
-            Cuil: "20123456789"
+            Dni: dni,
+            Cuil: cuil
         );
 
         return Task.FromResult<LdapUserInfo?>(mockUser);

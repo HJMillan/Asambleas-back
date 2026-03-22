@@ -34,8 +34,10 @@ ENV ASPNETCORE_ENVIRONMENT=Production
 # Solo exponer el puerto necesario
 EXPOSE 8080
 
-# Healthcheck para orquestadores (Docker Compose, Kubernetes)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["dotnet", "Asambleas.dll", "--urls", "http://localhost:8080/health"] || exit 1
+# Healthcheck: la imagen chiseled no tiene curl/wget, así que no se puede hacer
+# un health check HTTP nativo desde Docker. Usar el healthcheck desde
+# docker-compose.yml o el orquestador (Kubernetes liveness probe, etc.)
+# El endpoint /health/live está disponible en la app ASP.NET.
+HEALTHCHECK NONE
 
 ENTRYPOINT ["dotnet", "Asambleas.dll"]

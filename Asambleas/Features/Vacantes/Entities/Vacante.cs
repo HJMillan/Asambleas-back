@@ -3,6 +3,9 @@ using Asambleas.Features.Asambleas.Entities;
 
 namespace Asambleas.Features.Vacantes.Entities;
 
+/// <summary>
+/// Tipo de cargo de una vacante docente.
+/// </summary>
 public enum TipoCargo
 {
     TITULAR,
@@ -11,6 +14,9 @@ public enum TipoCargo
     SUPLENTE
 }
 
+/// <summary>
+/// Estado del ciclo de vida de una vacante.
+/// </summary>
 public enum EstadoVacante
 {
     PUBLICADA,
@@ -23,6 +29,9 @@ public enum EstadoVacante
     CANCELADA
 }
 
+/// <summary>
+/// Turno del cargo vacante.
+/// </summary>
 public enum Turno
 {
     MANANA,
@@ -31,6 +40,10 @@ public enum Turno
     VESPERTINO
 }
 
+/// <summary>
+/// Representa una vacante docente disponible para postulación en una asamblea.
+/// Vinculada a un establecimiento y una asamblea específica.
+/// </summary>
 public class Vacante : BaseEntity
 {
     public string Cargo { get; set; } = string.Empty;

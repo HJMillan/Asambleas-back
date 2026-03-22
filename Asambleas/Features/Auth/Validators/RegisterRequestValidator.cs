@@ -34,7 +34,8 @@ public class RegisterRequestValidator : AbstractValidator<RegisterRequest>
             .MaximumLength(128).WithMessage("La contraseña no puede superar los 128 caracteres.")
             .Matches(@"[A-Z]").WithMessage("La contraseña debe contener al menos una mayúscula.")
             .Matches(@"[a-z]").WithMessage("La contraseña debe contener al menos una minúscula.")
-            .Matches(@"\d").WithMessage("La contraseña debe contener al menos un número.");
+            .Matches(@"\d").WithMessage("La contraseña debe contener al menos un número.")
+            .Matches(@"[^a-zA-Z0-9]").WithMessage("La contraseña debe contener al menos un carácter especial (!@#$%...).");
 
         RuleFor(x => x.ConfirmPassword)
             .NotEmpty().WithMessage("La confirmación de contraseña es obligatoria.")

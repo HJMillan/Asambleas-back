@@ -30,6 +30,9 @@ public class CorrelationIdMiddleware
             return Task.CompletedTask;
         });
 
+        // Almacenar en Items para que otros middleware puedan accederlo (ej: GlobalExceptionHandler)
+        context.Items["CorrelationId"] = correlationId;
+
         // Pushear al LogContext de Serilog para que todos los logs del request incluyan este ID
         using (LogContext.PushProperty("CorrelationId", correlationId))
         {

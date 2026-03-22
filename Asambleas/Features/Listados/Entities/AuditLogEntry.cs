@@ -14,7 +14,11 @@ public enum TipoAccionAudit
     RESOLUCION_IMPUGNACION,
     CAMBIO_ESTADO_VACANTE,
     CAMBIO_ROL_USUARIO,
-    VERIFICACION_DOMELEC
+    VERIFICACION_DOMELEC,
+    // Genéricos (usados por AuditInterceptor)
+    CREACION,
+    MODIFICACION,
+    ELIMINACION
 }
 
 public class AuditLogEntry : BaseEntity
